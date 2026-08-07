@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stable Fluids — Jos Stam (Semi-Lagrangian, Kármán Vortex Street)</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#131923; --ink:#dfe7f2; --dim:#8a97ab;
+    --accent:#38d6d0; --accent2:#6ea8ff; --good:#57e08a; --warn:#ffcf5c; --bad:#ff6b6b;
+    --line:#222c3b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(1200px 800px at 70% -10%, #10202b 0%, var(--bg) 55%);
+    color:var(--ink);
+    font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display:flex; min-height:100%; align-items:flex-start; justify-content:center;
+    gap:22px; padding:22px; flex-wrap:wrap;
+  }
+  h1{font-size:15px;margin:0 0 2px;letter-spacing:.3px}
+  h1 small{color:var(--dim);font-weight:400}
+  .stage{position:relative}
+  canvas{
+    width:min(70vh,640px); height:min(70vh,640px);
+    image-rendering:pixelated; image-rendering:crisp-edges;
+    border-radius:10px; border:1px solid var(--line);
+    box-shadow:0 20px 60px rgba(0,0,0,.55), inset 0 0 0 1px rgba(255,255,255,.02);
+    cursor:crosshair; display:block; background:#05070c;
+  }
+  .hint{color:var(--dim);margin-top:8px;max-width:640px}
+  .panel{
+    width:330px; background:linear-gradient(180deg,#141b26,#0f141d);
+    border:1px solid var(--line); border-radius:12px; padding:16px 16px 18px;
+    box-shadow:0 20px 60px rgba(0,0,0,.45);
+  }
+  .stats{display:grid;grid-template-columns:1fr auto;gap:6px 10px;margin:6px 0 14px}
+  .stats .k{color:var(--dim)}
+  .stats .v{text-align:right;font-variant-numeric:tabular-nums}
+  .badge{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px}
+  .b-good{background:rgba(87,224,138,.14);color:var(--good)}
+  .b-bad{background:rgba(255,107,107,.16);color:var(--bad)}
+  .row{margin:11px 0}
+  .row label{display:flex;justify-content:space-between;color:var(--dim);margin-bottom:5px}
+  .row label b{color:var(--ink);font-weight:600}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  button{
+    flex:1 1 auto; min-width:92px; cursor:pointer;
+    background:#1b2534;color:var(--ink);border:1px solid var(--line);
+    padding:8px 10px;border-radius:8px;font:inherit;transition:.12s;
+  }
+  button:hover{border-color:var(--accent);color:#fff}
+  button.warn{border-color:rgba(255,207,92,.4);color:var(--warn)}
+  hr{border:none;border-top:1px solid var(--line);margin:14px 0}
+  .legend{display:flex;gap:8px;align-items:center;color:var(--dim);margin-top:10px}
+  .swatch{height:12px;flex:1;border-radius:4px;
+    background:linear-gradient(90deg,#05070f,#154a6e,#28b4c8,#eaffff)}
+  code{color:var(--accent2)}
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <h1>Stable Fluids <small>— Semi-Lagrangian · iterative diffusion · pressure projection</small></h1>
+  <canvas id="c" width="256" height="256"></canvas>
+  <div class="hint">
+    Steady inflow from the left past a cylinder → <b>Kármán vortex street</b>.
+    <b>Drag</b> to paint dye and inject velocity. Grid <code>256×256</code>. Solver is unconditionally
+    stable — push <b>dt</b> to the max or hit <b>Stress dt</b> and it will not blow up.
+  </div>
+</div>
+
+<div class="panel">
+  <div class="stats">
+    <div class="k">Status</div>            <div class="v"><span id="status" class="badge b-good">STABLE</span></div>
+    <div class="k">Mean |∇·u|</div>        <div class="v" id="divMean">—</div>
+    <div class="k">Max |∇·u|</div>         <div class="v" id="divMax">—</div>
+    <div class="k">Dye mass ∑ρ</div>       <div class="v" id="mass">—</div>
+    <div class="k">Mass drift</div>        <div class="v" id="massDrift">—</div>
+    <div class="k">Sim time / step</div>   <div class="v" id="ms">—</div>
+    <div class="k">FPS</div>               <div class="v" id="fps">—</div>
+  </div>
+
+  <div class="row">
+    <label>Timestep <b><span id="dtV">0.120</span></b></label>
+    <input id="dt" type="range" min="0.02" max="4.0" step="0.02" value="0.12">
+  </div>
+  <div class="row">
+    <label>Inflow speed <b><span id="u0V">0.060</span></b></label>
+    <input id="u0" type="range" min="0" max="0.20" step="0.005" value="0.06">
+  </div>
+  <div class="row">
+    <label>Viscosity <b><span id="viscV">0.00002</span></b></label>
+    <input id="visc" type="range" min="0" max="0.0004" step="0.00001" value="0.00002">
+  </div>
+  <div class="row">
+    <label>Pressure iterations <b><span id="iterV">30</span></b></label>
+    <input id="iter" type="range" min="4" max="80" step="1" value="30">
+  </div>
+  <div class="row">
+    <label>Dye at inlet <b><span id="inkV">on</span></b></label>
+    <input id="ink" type="range" min="0" max="1" step="1" value="1">
+  </div>
+
+  <div class="btns">
+    <button id="pause">Pause</button>
+    <button id="reset">Reset</button>
+    <button id="stress" class="warn">Stress dt</button>
+  </div>
+
+  <hr>
+  <div style="color:var(--dim)">Density → color</div>
+  <div class="legend"><span>low</span><div class="swatch"></div><span>high</span></div>
+  <div class="hint" style="margin-top:12px">
+    Per step: add forces → <b>diffuse</b> (Gauss–Seidel) → <b>project</b> →
+    <b>advect</b> (semi-Lagrangian backtrace) → <b>project</b>. Obstacle uses no-slip / no-flux
+    (Neumann) boundaries; walls are free-slip; outlet is zero-gradient.
+  </div>
+</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   Jos Stam — "Stable Fluids" (SIGGRAPH 1999) / "Real-Time Fluid Dynamics
+   for Games" (2003), extended with an internal cylindrical obstacle so the
+   wake sheds a Kármán vortex street. Collocated grid with a 1-cell ghost
+   border: arrays are (N+2)×(N+2), interior indices 1..N.
+   ========================================================================= */
+
+const N   = 256;                 // interior grid resolution (256×256)
+const N2  = N + 2;
+const SZ  = N2 * N2;
+const IX  = (i, j) => i + N2 * j;
+
+// --- fields -------------------------------------------------------------
+let u  = new Float32Array(SZ), v  = new Float32Array(SZ);   // velocity
+let u0 = new Float32Array(SZ), v0 = new Float32Array(SZ);   // scratch / prev
+let dens = new Float32Array(SZ), dens0 = new Float32Array(SZ);
+let p    = new Float32Array(SZ), div = new Float32Array(SZ);
+const solid = new Uint8Array(SZ);                            // obstacle mask
+const fluidNbrs = new Uint8Array(SZ);                        // #fluid neighbours (for Poisson)
+
+// --- tunables (bound to UI) --------------------------------------------
+let DT = 0.12, U0 = 0.06, VISC = 0.00002, PITER = 30, INLET_INK = 1;
+let running = true, frame = 0, mass0 = 0;
+
+// --- obstacle geometry --------------------------------------------------
+// slightly off-centre so the wake is not perfectly symmetric → shedding starts.
+const CX = N * 0.28, CY = N * 0.5 + 2.5, R = N / 16;
+
+function buildSolid(){
+  solid.fill(0);
+  for (let j = 1; j <= N; j++){
+    for (let i = 1; i <= N; i++){
+      const dx = i - CX, dy = j - CY;
+      if (dx*dx + dy*dy <= R*R) solid[IX(i,j)] = 1;
+    }
+  }
+  // cache fluid-neighbour count for the pressure solve (domain ghosts count as fluid)
+  for (let j = 1; j <= N; j++){
+    for (let i = 1; i <= N; i++){
+      const c = IX(i,j);
+      if (solid[c]) { fluidNbrs[c] = 0; continue; }
+      let n = 0;
+      if (!solid[IX(i-1,j)]) n++;
+      if (!solid[IX(i+1,j)]) n++;
+      if (!solid[IX(i,j-1)]) n++;
+      if (!solid[IX(i,j+1)]) n++;
+      fluidNbrs[c] = n;
+    }
+  }
+}
+
+/* -----------------------------------------------------------------------
+   Boundary conditions.
+   b = 0 : scalar (density / pressure / divergence) — zero-gradient
+   b = 1 : x-velocity u    b = 2 : y-velocity v
+   Left = inflow, Right = outflow (zero-gradient), Top/Bottom = free-slip.
+   Interior obstacle cells are forced to zero (no-slip velocity / masked scalar).
+   ----------------------------------------------------------------------- */
+function setBnd(b, x){
+  for (let j = 1; j <= N; j++){
+    // left inflow
+    if      (b === 1) x[IX(0,j)] = U0;          // horizontal inflow
+    else if (b === 2) x[IX(0,j)] = 0;           // no vertical component at inlet
+    else              x[IX(0,j)] = x[IX(1,j)];  // scalar zero-gradient
+    // right outflow — zero-gradient for everything (open boundary)
+    x[IX(N+1,j)] = x[IX(N,j)];
+  }
+  for (let i = 1; i <= N; i++){
+    // bottom / top: free-slip walls (normal velocity v = 0, rest zero-gradient)
+    if (b === 2){ x[IX(i,0)] = 0; x[IX(i,N+1)] = 0; }
+    else        { x[IX(i,0)] = x[IX(i,1)]; x[IX(i,N+1)] = x[IX(i,N)]; }
+  }
+  // corners
+  x[IX(0,0)]     = 0.5*(x[IX(1,0)]     + x[IX(0,1)]);
+  x[IX(0,N+1)]   = 0.5*(x[IX(1,N+1)]   + x[IX(0,N)]);
+  x[IX(N+1,0)]   = 0.5*(x[IX(N,0)]     + x[IX(N+1,1)]);
+  x[IX(N+1,N+1)] = 0.5*(x[IX(N,N+1)]   + x[IX(N+1,N)]);
+
+  // interior obstacle: velocity 0 (no-slip), scalars masked to 0
+  for (let j = 1; j <= N; j++)
+    for (let i = 1; i <= N; i++)
+      if (solid[IX(i,j)]) x[IX(i,j)] = 0;
+}
+
+// generic Gauss–Seidel relaxation for the (implicit) diffusion step
+function linSolve(b, x, x0, a, c, iters){
+  const invC = 1.0 / c;
+  for (let k = 0; k < iters; k++){
+    for (let j = 1; j <= N; j++){
+      for (let i = 1; i <= N; i++){
+        const idx = IX(i,j);
+        if (solid[idx]) continue;
+        x[idx] = (x0[idx] + a*(x[idx-1] + x[idx+1] + x[idx-N2] + x[idx+N2])) * invC;
+      }
+    }
+    setBnd(b, x);
+  }
+}
+
+function diffuse(b, x, x0, diff, dt){
+  const a = dt * diff * N * N;
+  if (a === 0){ x.set(x0); setBnd(b, x); return; }
+  linSolve(b, x, x0, a, 1 + 4*a, 4);
+}
+
+// Semi-Lagrangian advection — unconditionally stable for any dt.
+function advect(b, d, d0, uu, vv, dt){
+  const dt0 = dt * N;
+  for (let j = 1; j <= N; j++){
+    for (let i = 1; i <= N; i++){
+      const c = IX(i,j);
+      if (solid[c]){ d[c] = 0; continue; }
+      let x = i - dt0 * uu[c];
+      let y = j - dt0 * vv[c];
+      if (x < 0.5)     x = 0.5; else if (x > N + 0.5) x = N + 0.5;
+      if (y < 0.5)     y = 0.5; else if (y > N + 0.5) y = N + 0.5;
+      const i0 = x|0, i1 = i0 + 1;
+      const j0 = y|0, j1 = j0 + 1;
+      const s1 = x - i0, s0 = 1 - s1;
+      const t1 = y - j0, t0 = 1 - t1;
+      d[c] = s0*(t0*d0[IX(i0,j0)] + t1*d0[IX(i0,j1)])
+           + s1*(t0*d0[IX(i1,j0)] + t1*d0[IX(i1,j1)]);
+    }
+  }
+  setBnd(b, d);
+}
+
+/* Pressure projection with obstacle-aware Poisson solve.
+   Solve ∇²p = ∇·u using Gauss–Seidel where solid neighbours are dropped
+   (Neumann / no-flux at the cylinder), then subtract ∇p from the velocity. */
+function project(uu, vv, pr, dv){
+  const h = 1.0 / N;
+  for (let j = 1; j <= N; j++){
+    for (let i = 1; i <= N; i++){
+      const c = IX(i,j);
+      if (solid[c]){ dv[c] = 0; pr[c] = 0; continue; }
+      dv[c] = -0.5 * h * (uu[c+1] - uu[c-1] + vv[c+N2] - vv[c-N2]);
+      pr[c] = 0;
+    }
+  }
+  setBnd(0, dv); setBnd(0, pr);
+
+  for (let k = 0; k < PITER; k++){
+    for (let j = 1; j <= N; j++){
+      for (let i = 1; i <= N; i++){
+        const c = IX(i,j);
+        if (solid[c]) continue;
+        const n = fluidNbrs[c];
+        if (n === 0) { pr[c] = 0; continue; }
+        let sum = 0;
+        if (!solid[c-1])   sum += pr[c-1];
+        if (!solid[c+1])   sum += pr[c+1];
+        if (!solid[c-N2])  sum += pr[c-N2];
+        if (!solid[c+N2])  sum += pr[c+N2];
+        pr[c] = (dv[c] + sum) / n;   // dv already carries the /N (h) scaling
+      }
+    }
+    setBnd(0, pr);
+  }
+
+  // subtract pressure gradient; a solid face contributes no gradient (no-flux)
+  for (let j = 1; j <= N; j++){
+    for (let i = 1; i <= N; i++){
+      const c = IX(i,j);
+      if (solid[c]) continue;
+      const pl = solid[c-1]  ? pr[c] : pr[c-1];
+      const prr= solid[c+1]  ? pr[c] : pr[c+1];
+      const pb = solid[c-N2] ? pr[c] : pr[c-N2];
+      const pt = solid[c+N2] ? pr[c] : pr[c+N2];
+      uu[c] -= 0.5 * N * (prr - pl);
+      vv[c] -= 0.5 * N * (pt - pb);
+    }
+  }
+  setBnd(1, uu); setBnd(2, vv);
+}
+
+/* ---- one full simulation step (Stam's ordering) ---------------------- */
+function velStep(dt){
+  // (forces are already added into u,v by the inlet driver / mouse)
+  [u0,u]=[u,u0]; diffuse(1, u, u0, VISC, dt);
+  [v0,v]=[v,v0]; diffuse(2, v, v0, VISC, dt);
+  project(u, v, p, div);
+  [u0,u]=[u,u0]; [v0,v]=[v,v0];
+  advect(1, u, u0, u0, v0, dt);
+  advect(2, v, v0, u0, v0, dt);
+  project(u, v, p, div);
+}
+function densStep(dt){
+  [dens0,dens]=[dens,dens0];
+  diffuse(0, dens, dens0, 0.0, dt);          // pure numerical diffusion (visc 0)
+  [dens0,dens]=[dens,dens0];
+  advect(0, dens, dens0, u, v, dt);
+  // gentle fade so dye that recirculates doesn't saturate the whole domain
+  for (let k = 0; k < SZ; k++) dens[k] *= 0.999;
+}
+
+// continuous drivers: uniform inlet momentum + a dye band + a whisper of
+// noise to seed the instability that becomes the vortex street.
+function drivers(dt){
+  const bandLo = (N*0.32)|0, bandHi = (N*0.68)|0;
+  for (let j = 1; j <= N; j++){
+    for (let ii = 1; ii <= 2; ii++){
+      const c = IX(ii, j);
+      if (solid[c]) continue;
+      u[c] += (U0 - u[c]) * 0.5;              // relax toward inflow speed
+      if (INLET_INK && j >= bandLo && j <= bandHi) dens[c] = 1.0;
+    }
+  }
+  // tiny broadband perturbation (deterministic-ish, no Math.random dependency needed)
+  const amp = 0.0008 * U0 / 0.06;
+  for (let j = 1; j <= N; j++){
+    const c = IX(3, j);
+    if (!solid[c]) v[c] += amp * Math.sin(0.37*j + 0.11*frame) * Math.cos(0.09*frame);
+  }
+}
+
+/* ---- diagnostics ------------------------------------------------------ */
+function diagnostics(){
+  let dMean = 0, dMax = 0, m = 0, cnt = 0, nan = false;
+  for (let j = 1; j <= N; j++){
+    for (let i = 1; i <= N; i++){
+      const c = IX(i,j);
+      if (solid[c]) continue;
+      const d = 0.5 * (u[c+1] - u[c-1] + v[c+N2] - v[c-N2]);
+      const ad = Math.abs(d);
+      dMean += ad; if (ad > dMax) dMax = ad;
+      m += dens[c]; cnt++;
+      if (!nan && (u[c]!==u[c] || v[c]!==v[c] || d!==d)) nan = true;
+    }
+  }
+  dMean /= (cnt||1);
+  return { dMean, dMax, mass:m, nan };
+}
+
+/* ---- rendering -------------------------------------------------------- */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha:false });
+const img = ctx.createImageData(N, N);
+const pix = img.data;
+
+// smooth 4-stop colour ramp: deep navy → teal → cyan → white
+const STOPS = [
+  [0.00,  5,  7, 15],
+  [0.35, 21, 74,110],
+  [0.70, 40,180,200],
+  [1.00,234,255,255],
+];
+function ramp(t){
+  if (t <= 0) return STOPS[0];
+  for (let s = 1; s < STOPS.length; s++){
+    if (t <= STOPS[s][0]){
+      const a = STOPS[s-1], b = STOPS[s];
+      const f = (t - a[0]) / (b[0] - a[0]);
+      return [a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f, a[3]+(b[3]-a[3])*f];
+    }
+  }
+  return STOPS[STOPS.length-1];
+}
+
+function render(){
+  let o = 0;
+  for (let j = 1; j <= N; j++){
+    for (let i = 1; i <= N; i++){
+      const c = IX(i,j);
+      if (solid[c]){
+        pix[o]=78; pix[o+1]=84; pix[o+2]=98; pix[o+3]=255; o+=4; continue;
+      }
+      const d = dens[c];
+      const t = 1 - Math.exp(-2.2 * (d > 0 ? d : 0));   // tone map
+      const col = ramp(t);
+      pix[o]=col[0]|0; pix[o+1]=col[1]|0; pix[o+2]=col[2]|0; pix[o+3]=255;
+      o += 4;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+/* ---- mouse / touch interaction --------------------------------------- */
+let dragging = false, pmx = 0, pmy = 0;
+function toCell(ev){
+  const r = canvas.getBoundingClientRect();
+  const px = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
+  const py = (ev.touches ? ev.touches[0].clientY : ev.clientY) - r.top;
+  return { x: 1 + (px / r.width) * N, y: 1 + (py / r.height) * N };
+}
+function splat(mx, my, dx, dy){
+  const rad = 5, force = 6.0;
+  const ci = Math.round(mx), cj = Math.round(my);
+  for (let a = -rad; a <= rad; a++){
+    for (let b = -rad; b <= rad; b++){
+      const i = ci + a, j = cj + b;
+      if (i < 1 || i > N || j < 1 || j > N) continue;
+      if (a*a + b*b > rad*rad) continue;
+      const c = IX(i,j);
+      if (solid[c]) continue;
+      const w = 1 - Math.sqrt(a*a+b*b)/(rad+1);
+      u[c] += dx * force * w;
+      v[c] += dy * force * w;
+      dens[c] = Math.min(2.5, dens[c] + 1.4 * w);
+    }
+  }
+}
+function onDown(ev){ dragging = true; const m = toCell(ev); pmx = m.x; pmy = m.y; ev.preventDefault(); }
+function onMove(ev){
+  if (!dragging) return;
+  const m = toCell(ev);
+  splat(m.x, m.y, (m.x - pmx) * 0.02, (m.y - pmy) * 0.02);
+  pmx = m.x; pmy = m.y; ev.preventDefault();
+}
+function onUp(){ dragging = false; }
+canvas.addEventListener('mousedown', onDown);
+canvas.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onUp);
+canvas.addEventListener('touchstart', onDown, {passive:false});
+canvas.addEventListener('touchmove',  onMove, {passive:false});
+window.addEventListener('touchend', onUp);
+
+/* ---- UI binding ------------------------------------------------------- */
+const $ = id => document.getElementById(id);
+function bind(id, fn, fmt){
+  const el = $(id), out = $(id + 'V');
+  const upd = () => { const val = parseFloat(el.value); fn(val); if(out) out.textContent = fmt?fmt(val):val; };
+  el.addEventListener('input', upd); upd();
+}
+bind('dt',   v => DT = v,   v => v.toFixed(3));
+bind('u0',   v => U0 = v,   v => v.toFixed(3));
+bind('visc', v => VISC = v, v => v.toFixed(5));
+bind('iter', v => PITER = v, v => String(v|0));
+bind('ink',  v => INLET_INK = v|0, v => (v ? 'on' : 'off'));
+
+$('pause').addEventListener('click', () => {
+  running = !running; $('pause').textContent = running ? 'Pause' : 'Resume';
+});
+$('reset').addEventListener('click', reset);
+$('stress').addEventListener('click', () => {
+  // slam the timestep to the maximum for a few seconds to prove stability
+  $('dt').value = 4.0; DT = 4.0; $('dtV').textContent = '4.000';
+  setTimeout(() => { $('dt').value = 0.12; DT = 0.12; $('dtV').textContent = '0.120'; }, 3500);
+});
+
+function reset(){
+  u.fill(0); v.fill(0); u0.fill(0); v0.fill(0);
+  dens.fill(0); dens0.fill(0); p.fill(0); div.fill(0);
+  buildSolid();
+  for (let k = 0; k < SZ; k++) if (!solid[k]) u[k] = U0;   // start with uniform stream
+  setBnd(1,u); setBnd(2,v);
+  frame = 0; mass0 = 0;
+  $('status').className = 'badge b-good'; $('status').textContent = 'STABLE';
+}
+
+/* ---- main loop -------------------------------------------------------- */
+let lastT = performance.now(), fpsAcc = 0, fpsN = 0, blown = false;
+function loop(now){
+  requestAnimationFrame(loop);
+  const dtWall = now - lastT; lastT = now;
+
+  if (running && !blown){
+    const t0 = performance.now();
+    drivers(DT);
+    velStep(DT);
+    densStep(DT);
+    frame++;
+    const stepMs = performance.now() - t0;
+
+    if ((frame & 3) === 0){                 // update stats every 4 steps
+      const d = diagnostics();
+      if (mass0 === 0 && d.mass > 0) mass0 = d.mass;
+      $('divMean').textContent = d.dMean.toExponential(2);
+      $('divMax').textContent  = d.dMax.toExponential(2);
+      $('mass').textContent    = d.mass.toFixed(1);
+      $('massDrift').textContent = mass0 ? ((d.mass - mass0)/mass0*100).toFixed(2)+' %' : '—';
+      $('ms').textContent      = stepMs.toFixed(1) + ' ms';
+      if (d.nan){
+        blown = true;
+        $('status').className = 'badge b-bad'; $('status').textContent = 'NaN!';
+      }
+      fpsAcc += 1000/Math.max(dtWall,1); fpsN++;
+      if (fpsN >= 8){ $('fps').textContent = (fpsAcc/fpsN).toFixed(0); fpsAcc=0; fpsN=0; }
+    }
+  }
+  render();
+}
+
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
